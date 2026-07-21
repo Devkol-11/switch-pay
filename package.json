@@ -1,0 +1,13 @@
+{
+  "name": "switch-pay-monorepo",
+  "private": true,
+  "workspaces": [
+    "apps/*"
+  ],
+  "scripts": {
+    "dev": "bun --filter '*' dev"
+  },
+  "devDependencies": {
+    "prisma": "^7.8.0"
+  }
+}

@@ -1,0 +1,220 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Get a free hosted Postgres database in seconds: `npx create-db`
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+/////////////////
+
+// --- Platform Enums ---
+
+enum Provider {
+  paystack
+  flutterwave
+  monnify
+}
+
+enum AccountType {
+  credentials
+  oauth
+}
+
+enum OAuthProvider {
+  google
+  github
+}
+
+enum Mode {
+  test
+  live
+}
+
+enum CredentialStatus {
+  pending
+  active
+  disabled
+  invalid
+}
+
+enum PaymentState {
+  INITIATED
+  PROCESSING
+  SUCCESS
+  FAILED
+  REVERSED
+  ABANDONED
+}
+
+enum TransitionSource {
+  webhook
+  manual
+  timeout_sweep
+  system
+}
+
+enum BreakerState {
+  CLOSED
+  OPEN
+  HALF_OPEN
+}
+
+// --- Data Models ---
+
+model Merchant {
+  id        String   @id @db.Char(26) // ULID
+  email     String   @unique // canonical identity email
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz
+
+  accounts        MerchantAccount[]
+  sessions        MerchantSession[]
+  profile         MerchantProfile?
+  credentials     ProviderCredential[]
+  payments        Payment[]
+  providerHealths ProviderHealthHistory[]
+
+  @@map("merchants")
+}
+
+model MerchantAccount {
+  id                String         @id @db.Char(26) // ULID
+  merchantId        String         @map("merchant_id") @db.Char(26)
+  type              AccountType
+  provider          OAuthProvider? // null when type = credentials
+  providerAccountId String?        @map("provider_account_id") // null when type = credentials
+  passwordHash      String?        @map("password_hash") // argon2, only set when type = credentials
+  accessToken       String?        @map("access_token") // OAuth provider's token, not a Switch Pay session
+  refreshToken      String?        @map("refresh_token") // OAuth provider's token, not a Switch Pay session
+  tokenExpiresAt    DateTime?      @map("token_expires_at") @db.Timestamptz
+  createdAt         DateTime       @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt         DateTime       @default(now()) @updatedAt @map("updated_at") @db.Timestamptz
+
+  merchant Merchant @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId]) // one oauth identity → one account, globally
+  @@unique([merchantId, type]) // a merchant can't have two 'credentials' rows
+  @@map("merchant_accounts")
+}
+
+model MerchantSession {
+  id           String   @id @db.Char(26) // ULID
+  merchantId   String   @map("merchant_id") @db.Char(26)
+  sessionToken String   @unique @map("session_token") // opaque token, hashed at rest ideally
+  userAgent    String?  @map("user_agent")
+  ipAddress    String?  @map("ip_address")
+  expiresAt    DateTime @map("expires_at") @db.Timestamptz
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  merchant Merchant @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+
+  @@index([merchantId, expiresAt], name: "idx_sessions_merchant_expires")
+  @@map("merchant_sessions")
+}
+
+model MerchantProfile {
+  id                   String   @id @db.Char(26) // ULID
+  merchantId           String   @unique @map("merchant_id") @db.Char(26) // 1:1
+  businessName         String   @map("business_name")
+  defaultCurrency      String   @default("NGN") @map("default_currency") @db.Char(3)
+  logoUrl              String?  @map("logo_url")
+  dashboardPreferences Json?    @map("dashboard_preferences")
+  createdAt            DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt            DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz
+
+  merchant Merchant @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+
+  @@map("merchant_profiles")
+}
+
+model ProviderCredential {
+  id              String           @id @db.Char(26) // ULID
+  merchantId      String           @map("merchant_id") @db.Char(26)
+  provider        Provider
+  mode            Mode
+  encryptedSecret Bytes            @map("encrypted_secret") // AES-256-GCM ciphertext bytea
+  encryptionKeyId String           @map("encryption_key_id") // For rotation tracking
+  publicKey       String?          @map("public_key")
+  status          CredentialStatus @default(pending)
+  createdAt       DateTime         @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt       DateTime         @default(now()) @updatedAt @map("updated_at") @db.Timestamptz
+
+  merchant Merchant @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+
+  @@unique([merchantId, provider, mode])
+  @@map("provider_credentials")
+}
+
+model Payment {
+  id                String       @id @db.Char(26) // ULID
+  merchantId        String       @map("merchant_id") @db.Char(26)
+  internalReference String       @unique @map("internal_reference") // Durable pre-call nanoid anchor
+  provider          Provider
+  providerReference String?      @unique @map("provider_reference")
+  amountMinor       BigInt       @map("amount_minor") // Kobo / Minor units stored securely
+  currency          String       @default("NGN") @db.Char(3)
+  isTest            Boolean      @default(false) @map("is_test")
+  currentState      PaymentState @default(INITIATED) @map("current_state") // OLTP fast read cache optimization
+  customerEmail     String?      @map("customer_email")
+  metadata          Json?
+  createdAt         DateTime     @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt         DateTime     @default(now()) @updatedAt @map("updated_at") @db.Timestamptz
+
+  merchant      Merchant        @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+  ledgerEntries PaymentLedger[]
+
+  @@index([merchantId, currentState, createdAt(sort: Desc)], name: "idx_payments_merchant_state_created")
+  @@index([merchantId, provider, createdAt(sort: Desc)], name: "idx_payments_merchant_provider_created")
+  @@index([providerReference], name: "idx_payments_provider_reference")
+  @@map("payments")
+}
+
+model PaymentLedger {
+  id              String           @db.Char(26)
+  paymentId       String           @map("payment_id") @db.Char(26)
+  fromState       PaymentState?    @map("from_state")
+  toState         PaymentState
+  source          TransitionSource
+  payloadSnapshot Json?            @map("payload_snapshot")
+  createdAt       DateTime         @default(now()) @map("created_at") @db.Timestamptz
+
+  payment Payment @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+
+  // Composite ID maps your partitioned layout structure requirements
+  @@id([id, createdAt])
+  @@index([paymentId, createdAt(sort: Desc)], name: "idx_ledger_payment_id")
+  @@map("payment_ledger")
+}
+
+model WebhookEvent {
+  id             String    @id @db.Char(26) // ULID
+  provider       Provider
+  idempotencyKey String    @map("idempotency_key")
+  signatureValid Boolean   @map("signature_valid")
+  rawPayload     Json      @map("raw_payload")
+  processedAt    DateTime? @map("processed_at") @db.Timestamptz
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz
+
+  @@unique([provider, idempotencyKey])
+  @@map("webhook_events")
+}
+
+model ProviderHealthHistory {
+  id             String       @id @db.Char(26) // ULID
+  merchantId     String       @map("merchant_id") @db.Char(26)
+  provider       Provider
+  breakerState   BreakerState @map("breaker_state")
+  transitionedAt DateTime     @default(now()) @map("transitioned_at") @db.Timestamptz
+
+  merchant Merchant @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+
+  @@index([merchantId, provider, transitionedAt(sort: Desc)], name: "idx_provider_health_merchant_provider")
+  @@map("provider_health_history")
+}

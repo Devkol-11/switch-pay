@@ -1,0 +1,27 @@
+# Dependencies
+node_modules/
+.bun/
+
+# Build and runtime artifacts
+dist/
+build/
+coverage/
+*.tsbuildinfo
+*.log
+*.pid
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+apps/backend/.env
+apps/frontend/.env.local
+
+# Docker and local state
+docker-data/
+*.local
+
+# IDE and OS files
+.DS_Store
+.vscode/
+.idea/
