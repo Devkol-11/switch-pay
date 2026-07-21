@@ -2,6 +2,7 @@ import app from './app';
 import { logger } from './shared/utils/logger';
 import { appConfig } from './config/constants';
 import { connectDB, disconnectDB } from './providers/db';
+import { connectRedis, disconnectRedis } from './providers/redis';
 
 async function bootstrap() {
     logger.info(`🚀 Initializing Switch Pay core engine on Bun...`);
@@ -9,6 +10,7 @@ async function bootstrap() {
     logger.info(`🔧 Port: ${appConfig.port}`);
 
     await connectDB();
+    await connectRedis();
 
     try {
         const server = Bun.serve({
@@ -47,6 +49,7 @@ async function bootstrap() {
             logger.info(`🛑 Received ${signal}, shutting down gracefully...`);
             server.stop();
             await disconnectDB();
+            await disconnectRedis();
             logger.info('✅ Shutdown complete');
             process.exit(0);
         };
